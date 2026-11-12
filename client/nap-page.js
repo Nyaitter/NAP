@@ -116,18 +116,26 @@ export function createNapPage(options = {}) {
     // 取得結果を Cache Storage へ格納する。キーは版の中のパスそのまま
     // 構成員は nap_modules/<参照>/ の下。Service Worker からはこの
     // キャッシュを版のファイルとして参照できる。
-    async function store(result) {
+    async function store(result, options = {}) {
         if (typeof caches === 'undefined') {
             throw new Error('Cache Storage が使えない環境です。');
         }
         const flat = {};
         flattenInto(flat, '', result);
         const storage = await caches.open(cacheName(result.versionId));
-        for (const [rel, bytes] of Object.entries(flat)) {
+        const entries = Object.entries(flat);
+        let done = 0;
+        for (const [rel, bytes] of entries) {
             await storage.put(
                 rel,
                 new Response(bytes, { headers: { 'Content-Type': typeFor(rel) } }),
             );
+            done += 1;
+            if (typeof options.onProgress === 'function') {
+                try {
+                    options.onProgress({ done, total: entries.length });
+                } catch (_) {}
+            }
         }
         return cacheName(result.versionId);
     }

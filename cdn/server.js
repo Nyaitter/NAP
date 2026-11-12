@@ -22,6 +22,8 @@ const MISS_FETCH_INTERVAL_MS = 5000;
 
 const REPOS_DIR = path.join(DATA_DIR, 'repos');
 fs.mkdirSync(REPOS_DIR, { recursive: true });
+const ARCHIVES_DIR = path.join(DATA_DIR, 'archives');
+fs.mkdirSync(ARCHIVES_DIR, { recursive: true });
 
 const ID_PATTERN = /^[0-9a-f]{64}(-[A-Za-z0-9][A-Za-z0-9._-]*)?$/;
 const CODE_PATTERN = /^[0-9a-z]{3,}$/;
@@ -707,6 +709,37 @@ function resolveEntry(entries, refText) {
     return entry;
 }
 
+const archiveJobs = new Map();
+
+// 版の ZIP を作ってキャッシュする。版は不変なので、コミットごとに1回だけ作る。
+async function ensureArchiveFile(dir, entry) {
+    const target = path.join(ARCHIVES_DIR, `${entry.commit}.zip`);
+    try {
+        await fs.promises.access(target);
+        return target;
+    } catch (_) {}
+    if (!archiveJobs.has(entry.commit)) {
+        const job = (async () => {
+            const tmp = `${target}.tmp`;
+            await new Promise((resolve, reject) => {
+                const out = fs.createWriteStream(tmp);
+                const child = spawn('git', ['-C', dir, 'archive', '--format=zip', entry.commit], {
+                    stdio: ['ignore', 'pipe', 'ignore'],
+                });
+                child.stdout.pipe(out);
+                child.on('error', reject);
+                out.on('error', reject);
+                out.on('finish', resolve);
+            });
+            await fs.promises.rename(tmp, target);
+            return target;
+        })();
+        archiveJobs.set(entry.commit, job);
+        job.catch(() => {}).finally(() => archiveJobs.delete(entry.commit));
+    }
+    return archiveJobs.get(entry.commit);
+}
+
 async function handleVersionArchive(req, res, owner, repo, refText) {
     const dir = await ensureRepo(owner, repo);
     await fetchRepo(owner, repo);
@@ -720,8 +753,11 @@ async function handleVersionArchive(req, res, owner, repo, refText) {
         sendError(res, 404, '版が見つかりません');
         return;
     }
+    const file = await ensureArchiveFile(dir, entry);
+    const stat = await fs.promises.stat(file);
     res.writeHead(200, {
         'Content-Type': 'application/zip',
+        'Content-Length': stat.size,
         'Access-Control-Allow-Origin': '*',
         'Cache-Control': 'public, max-age=31536000, immutable',
     });
@@ -729,11 +765,7 @@ async function handleVersionArchive(req, res, owner, repo, refText) {
         res.end();
         return;
     }
-    const child = spawn('git', ['-C', dir, 'archive', '--format=zip', entry.commit], {
-        stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    child.stdout.pipe(res);
-    child.on('error', () => res.destroy());
+    fs.createReadStream(file).pipe(res);
 }
 
 async function handleSearch(req, res, url) {
