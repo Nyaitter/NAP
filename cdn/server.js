@@ -156,6 +156,30 @@ const OPENAPI = {
                 },
             },
         },
+        '/api/v1/repos/{owner}/{repo}/versions/{ref}/archive.zip': {
+            get: {
+                summary: '版の ZIP',
+                operationId: 'getVersionArchive',
+                parameters: [
+                    { name: 'owner', in: 'path', required: true, schema: { type: 'string' } },
+                    { name: 'repo', in: 'path', required: true, schema: { type: 'string' } },
+                    {
+                        name: 'ref',
+                        in: 'path',
+                        required: true,
+                        schema: { type: 'string' },
+                        description: '版ID、「版ID-ラベル」、版コードのいずれか',
+                    },
+                ],
+                responses: {
+                    '200': {
+                        description: '版の全ファイルをまとめた ZIP',
+                        content: { 'application/zip': { schema: { type: 'string', format: 'binary' } } },
+                    },
+                    '404': { $ref: '#/components/responses/NotFound' },
+                },
+            },
+        },
         '/api/v1/search': {
             get: {
                 summary: 'パッケージの検索',
@@ -636,17 +660,7 @@ async function handleVersionDetail(req, res, owner, repo, refText) {
         return;
     }
     const { entries } = await readIndex(dir);
-    let entry = null;
-    if (ID_PATTERN.test(refText)) {
-        const [id, ...labelParts] = refText.split('-');
-        const label = labelParts.length ? labelParts.join('-') : null;
-        entry = entries.find((e) => e.id === id && (e.tag || null) === label) || null;
-        if (!entry) entry = entries.find((e) => e.id === refText) || null;
-    }
-    if (!entry && CODE_PATTERN.test(refText)) {
-        entry = entries.find((e) => e.code === refText) || null;
-    }
-    if (!entry) entry = entries.find((e) => e.id === refText) || null;
+    const entry = resolveEntry(entries, refText);
     if (!entry) {
         sendError(res, 404, '版が見つかりません');
         return;
@@ -676,6 +690,50 @@ async function handleVersionDetail(req, res, owner, repo, refText) {
         },
         'public, max-age=31536000, immutable',
     );
+}
+
+function resolveEntry(entries, refText) {
+    let entry = null;
+    if (ID_PATTERN.test(refText)) {
+        const [id, ...labelParts] = refText.split('-');
+        const label = labelParts.length ? labelParts.join('-') : null;
+        entry = entries.find((e) => e.id === id && (e.tag || null) === label) || null;
+        if (!entry) entry = entries.find((e) => e.id === refText) || null;
+    }
+    if (!entry && CODE_PATTERN.test(refText)) {
+        entry = entries.find((e) => e.code === refText) || null;
+    }
+    if (!entry) entry = entries.find((e) => e.id === refText) || null;
+    return entry;
+}
+
+async function handleVersionArchive(req, res, owner, repo, refText) {
+    const dir = await ensureRepo(owner, repo);
+    await fetchRepo(owner, repo);
+    if (!(await isNapRepo(dir))) {
+        sendError(res, 404, 'NAP のリポジトリではありません');
+        return;
+    }
+    const { entries } = await readIndex(dir);
+    const entry = resolveEntry(entries, refText);
+    if (!entry) {
+        sendError(res, 404, '版が見つかりません');
+        return;
+    }
+    res.writeHead(200, {
+        'Content-Type': 'application/zip',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'public, max-age=31536000, immutable',
+    });
+    if (req.method === 'HEAD') {
+        res.end();
+        return;
+    }
+    const child = spawn('git', ['-C', dir, 'archive', '--format=zip', entry.commit], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    child.stdout.pipe(res);
+    child.on('error', () => res.destroy());
 }
 
 async function handleSearch(req, res, url) {
@@ -812,6 +870,10 @@ async function handle(req, res) {
                 }
                 if (segments.length === 6 && segments[5] === 'versions') {
                     await handleVersions(req, res, owner, repo);
+                    return;
+                }
+                if (segments[5] === 'versions' && segments.length === 8 && segments[7] === 'archive.zip') {
+                    await handleVersionArchive(req, res, owner, repo, segments[6]);
                     return;
                 }
                 if (segments[5] === 'versions' && segments.length === 7) {

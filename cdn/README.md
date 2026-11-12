@@ -52,6 +52,7 @@ $ NAP_RAW_BASE=https://cdn.example.jp nap get Nyaitter/Client
 | GET /api/v1/repos/<所有者>/<リポジトリ> | パッケージの情報。宣言と版の総数と最新版 |
 | GET /api/v1/repos/<所有者>/<リポジトリ>/versions | 版の一覧。版IDと版コードと出典と日時。開発中の版には印が付く |
 | GET /api/v1/repos/<所有者>/<リポジトリ>/versions/<版ID> | 版の詳細。説明とマニフェスト |
+| GET /api/v1/repos/<所有者>/<リポジトリ>/versions/<版ID>/archive.zip | 版の全ファイルをまとめた ZIP |
 | GET /api/v1/search?q=<キーワード> | パッケージの検索結果 |
 | GET /healthz | 生存確認 |
 

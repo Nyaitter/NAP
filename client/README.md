@@ -82,7 +82,9 @@ const version = await client.fetchVersion(repo, ref);
 
 版のファイルすべてを取得します。ref は版ID、または版IDとラベルを並べた形です。開発中の版を使うときはラベルまで書きます。
 
-第3引数に onProgress を渡すと、取得の進み具合が fetched と cached と total の形で通知されます。
+第3引数に onProgress を渡すと、取得の進み具合が phase と fetched と cached と total の形で通知されます。phase は download と unpack のどちらかです。
+
+rawBase を渡したクライアントは、配信サーバーの専用 API で版の一覧を取り、版のファイルは ZIP で一括取得します。ZIP の取得や展開に失敗したときは、ファイルごとの取得に切り替わります。ZIP の取得中は、進捗の bytes と bytesTotal に受信バイト数と全体のバイト数が入ります。
 
 戻り値は versionId と tag と files と libraries と stats です。
 
