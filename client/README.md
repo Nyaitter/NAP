@@ -103,7 +103,7 @@ import { createNapPage } from './nap-page.js';
 
 const page = createNapPage({
     source: '<所有者>/<リポジトリ>',
-    rawBase: 'https://cdn.example.jp',
+    rawBase: 'https://cdn.nyaitter.jp',
     currentVersionId: '<今の版ID>',
 });
 
@@ -115,7 +115,7 @@ if (hasUpdate) {
 }
 ```
 
-source は必須です。rawBase と currentVersionId は任意です。
+source は必須です。rawBase と currentVersionId は任意です。rawBase の既定は https://cdn.nyaitter.jp です。
 
 使える呼び出し:
 
