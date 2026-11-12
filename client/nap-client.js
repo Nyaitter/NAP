@@ -1,8 +1,9 @@
 // NAP のクライアント向け取得ライブラリ。
 // 索引 nap/index から版を探し、タグ先のマニフェストを取得して、
 // 全ファイルのハッシュ照合と版IDの再計算が通ったときだけ完全なファイル集合を返す。
-// 取得先はソースで指定し、ソースは「<所有者>/<リポジトリ>」の形、
-// 実際の URL は raw.githubusercontent.com の形式でソースから導出する。
+// 取得先はソースで指定し、ソースは「<所有者>/<リポジトリ>」の形。
+// 既定の URL は raw.githubusercontent.com の形式でソースから導出する。
+// rawBase を渡したときは、その配信サーバーの専用 API を使う。
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -84,9 +85,64 @@ function isVersionCode(text) {
     return !/^[0-9a-f]{64}(-[A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(text);
 }
 
-// 版を指すタグ名。正式版は nap/<版ID>、TestVersion は nap/<版ID>-<ラベル>。
-function tagRefFor(id, tag) {
+// 版を指すパス。配信サーバー経由では版IDそのものを使う。
+// raw 配信ではタグ名で、正式版は nap/<版ID>、TestVersion は nap/<版ID>-<ラベル>。
+function pathRefFor(id, tag, viaApi) {
+    if (viaApi) return tag ? `${id}-${tag}` : `${id}`;
     return tag ? `nap/${id}-${tag}` : `nap/${id}`;
+}
+
+// ZIP の中央ディレクトリを読む。名前と圧縮方式と位置の表を返す。
+function readZipDirectory(bytes) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let eocd = -1;
+    const scanStart = Math.max(0, bytes.length - 65557);
+    for (let i = bytes.length - 22; i >= scanStart; i--) {
+        if (view.getUint32(i, true) === 0x06054b50) {
+            eocd = i;
+            break;
+        }
+    }
+    if (eocd === -1) throw new Error('ZIP の終端レコードが見つかりません。');
+    const count = view.getUint16(eocd + 10, true);
+    let offset = view.getUint32(eocd + 16, true);
+    const entries = [];
+    for (let i = 0; i < count; i++) {
+        if (view.getUint32(offset, true) !== 0x02014b50) {
+            throw new Error('ZIP の中央ディレクトリが不正です。');
+        }
+        const method = view.getUint16(offset + 10, true);
+        const size = view.getUint32(offset + 20, true);
+        const nameLen = view.getUint16(offset + 28, true);
+        const extraLen = view.getUint16(offset + 30, true);
+        const commentLen = view.getUint16(offset + 32, true);
+        const localOffset = view.getUint32(offset + 42, true);
+        const name = textDecoder.decode(bytes.subarray(offset + 46, offset + 46 + nameLen));
+        entries.push({ name, method, size, localOffset });
+        offset += 46 + nameLen + extraLen + commentLen;
+    }
+    return entries;
+}
+
+async function inflateEntry(bytes, entry) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const at = entry.localOffset;
+    if (view.getUint32(at, true) !== 0x04034b50) {
+        throw new Error('ZIP のローカルヘッダが不正です。');
+    }
+    const nameLen = view.getUint16(at + 26, true);
+    const extraLen = view.getUint16(at + 28, true);
+    const start = at + 30 + nameLen + extraLen;
+    const compressed = bytes.subarray(start, start + entry.size);
+    if (entry.method === 0) return new Uint8Array(compressed);
+    if (entry.method !== 8) {
+        throw new Error(`ZIP の圧縮方式に対応していません: ${entry.method}`);
+    }
+    if (typeof DecompressionStream === 'undefined') {
+        throw new Error('DecompressionStream が使えません。');
+    }
+    const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
 async function sha256Hex(bytes) {
@@ -149,6 +205,11 @@ export function createMemoryCache() {
 export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
     const doFetch = fetchImpl || ((...args) => globalThis.fetch(...args));
     const store = cache || createMemoryCache();
+    const viaApi = Boolean(rawBase);
+
+    function apiUrlFor(repo, suffix) {
+        return `${String(rawBase).replace(/\/+$/, '')}/api/v1/repos/${repo}${suffix}`;
+    }
 
     // ソースから導出した URL で取得し、応答のバイト列を返す。
     async function fetchBytes(repo, ref, filePath) {
@@ -175,6 +236,24 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
     // 索引から版の一覧を返す。latestOnly では先頭ファイルと最後のチャンクだけを読む。
     // 各項目の tag は、正式版では null、TestVersion ではそのラベル。
     async function listVersions(repo, { latestOnly = false } = {}) {
+        if (viaApi) {
+            try {
+                const res = await doFetch(apiUrlFor(repo, '/versions'));
+                if (res && res.ok) {
+                    const data = await res.json();
+                    const list = Array.isArray(data) ? data : data.versions || [];
+                    const entries = list.map((entry) => ({
+                        id: entry.id,
+                        commit: entry.commit,
+                        at: entry.at,
+                        tag: entry.tag || null,
+                        code: entry.code || null,
+                        source: entry.source || null,
+                    }));
+                    return { total: entries.length, entries };
+                }
+            } catch (_) {}
+        }
         const head = JSON.parse(await fetchText(repo, 'nap/index', 'index.json'));
         const defs = latestOnly ? head.chunks.slice(-1) : head.chunks;
         const entries = [];
@@ -196,6 +275,15 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
     // 最新の正式版を返す。TestVersion は対象にしない。正式版が無ければ null。
     // 後ろのチャンクから順に読み、正式版が見つかった時点で止める。
     async function latestVersion(repo) {
+        if (viaApi) {
+            const { entries } = await listVersions(repo);
+            for (let i = entries.length - 1; i >= 0; i--) {
+                if (!entries[i].tag) {
+                    return { id: entries[i].id, commit: entries[i].commit, at: entries[i].at, tag: null };
+                }
+            }
+            return null;
+        }
         const head = JSON.parse(await fetchText(repo, 'nap/index', 'index.json'));
         for (let i = head.chunks.length - 1; i >= 0; i--) {
             const list = JSON.parse(await fetchText(repo, 'nap/index', head.chunks[i].file));
@@ -209,7 +297,7 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
     }
 
     async function fetchManifest(repo, versionId, tag, stats) {
-        const text = await fetchText(repo, tagRefFor(versionId, tag), 'version-manifest.json');
+        const text = await fetchText(repo, pathRefFor(versionId, tag, viaApi), 'version-manifest.json');
         if (stats) stats.fetched += 1;
         let raw;
         try {
@@ -248,8 +336,77 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
     function notifyProgress(stats) {
         if (!stats || typeof stats.onProgress !== 'function') return;
         try {
-            stats.onProgress({ fetched: stats.fetched, cached: stats.cached, total: stats.total || 0 });
+            stats.onProgress({
+                phase: stats.phase || 'download',
+                fetched: stats.fetched,
+                cached: stats.cached,
+                total: stats.total || 0,
+                bytes: stats.byteFetched || 0,
+                bytesTotal: stats.byteTotal || 0,
+            });
         } catch (_) {}
+    }
+
+    // 版のファイルを ZIP で一括取得する。配信サーバー経由のときだけ使う。
+    // 進捗は download が受信バイト数、unpack が展開したファイル数で進む。
+    async function fetchPackageFilesViaZip(repo, versionId, tag, manifest, stats) {
+        const ref = pathRefFor(versionId, tag, true);
+        const res = await doFetch(apiUrlFor(repo, `/versions/${ref}/archive.zip`));
+        if (!res || !res.ok) throw new Error(`HTTP ${res ? res.status : '?'}`);
+        let bytes;
+        if (res.body && typeof res.body.getReader === 'function') {
+            const reader = res.body.getReader();
+            const chunks = [];
+            let received = 0;
+            const lengthHeader =
+                res.headers && typeof res.headers.get === 'function'
+                    ? Number(res.headers.get('content-length')) || 0
+                    : 0;
+            for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+                received += value.length;
+                if (stats) {
+                    stats.phase = 'download';
+                    stats.byteFetched = received;
+                    stats.byteTotal = lengthHeader;
+                    notifyProgress(stats);
+                }
+            }
+            bytes = new Uint8Array(received);
+            let at = 0;
+            for (const chunk of chunks) {
+                bytes.set(chunk, at);
+                at += chunk.length;
+            }
+        } else {
+            bytes = new Uint8Array(await res.arrayBuffer());
+        }
+        const byName = new Map(readZipDirectory(bytes).map((entry) => [entry.name, entry]));
+        const names = Object.keys(manifest.files);
+        const files = {};
+        let done = 0;
+        for (const rel of names) {
+            const entry = byName.get(rel);
+            if (!entry) throw new Error(`ZIP にファイルがありません: ${rel}`);
+            const data = await inflateEntry(bytes, entry);
+            const actual = await sha256Hex(data);
+            if (actual !== manifest.files[rel]) {
+                throw new Error(`照合に失敗しました: ${rel}`);
+            }
+            await store.put(manifest.files[rel], data);
+            files[rel] = data;
+            done += 1;
+            if (stats) {
+                stats.phase = 'unpack';
+                stats.fetched = done;
+                stats.total = names.length;
+                notifyProgress(stats);
+            }
+        }
+        if (stats) stats.phase = 'download';
+        return files;
     }
 
     async function fetchPackage(repo, versionId, tag, stats, fallbackToTest) {
@@ -263,12 +420,22 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
             if (!hit) throw error;
             return fetchPackage(repo, versionId, hit.tag, stats, false);
         }
-        if (stats) {
-            stats.total = (stats.total || 0) + Object.keys(manifest.files).length;
-            notifyProgress(stats);
+        let files = null;
+        if (viaApi) {
+            try {
+                files = await fetchPackageFilesViaZip(repo, versionId, tag, manifest, stats);
+            } catch (_) {
+                files = null;
+            }
         }
-        const files = {};
-        for (const rel of Object.keys(manifest.files).sort(compareTextBytes)) {
+        if (!files) {
+            if (stats) {
+                stats.phase = 'download';
+                stats.total = (stats.total || 0) + Object.keys(manifest.files).length;
+                notifyProgress(stats);
+            }
+            files = {};
+            for (const rel of Object.keys(manifest.files).sort(compareTextBytes)) {
             const expected = manifest.files[rel];
             const hit = await store.get(expected);
             if (hit) {
@@ -277,7 +444,7 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
                 notifyProgress(stats);
                 continue;
             }
-            const bytes = await fetchBytes(repo, tagRefFor(versionId, tag), rel);
+            const bytes = await fetchBytes(repo, pathRefFor(versionId, tag, viaApi), rel);
             const actual = await sha256Hex(bytes);
             if (actual !== expected) {
                 throw new Error(
@@ -288,6 +455,7 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
             files[rel] = bytes;
             stats.fetched += 1;
             notifyProgress(stats);
+            }
         }
         const libraries = {};
         for (const ref of Object.keys(manifest.libraries).sort(compareTextBytes)) {
@@ -327,7 +495,7 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
     // 版に属するファイル1点をソースから取得する。照合は呼び出し側で行う。
     async function fetchFile(repo, ref, filePath) {
         const { id, tag } = await resolveRef(repo, ref);
-        return fetchBytes(repo, tagRefFor(id, tag), filePath);
+        return fetchBytes(repo, pathRefFor(id, tag, viaApi), filePath);
     }
 
     // ref は「<版ID>」または「<版ID>-<ラベル>」。TestVersion を使うときは明示指定する。
