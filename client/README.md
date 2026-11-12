@@ -82,13 +82,15 @@ const version = await client.fetchVersion(repo, ref);
 
 版のファイルすべてを取得します。ref は版ID、または版IDとラベルを並べた形です。開発中の版を使うときはラベルまで書きます。
 
+第3引数に onProgress を渡すと、取得の進み具合が fetched と cached と total の形で通知されます。
+
 戻り値は versionId と tag と files と libraries と stats です。
 
 - versionId: 版ID。ラベルは含まない
 - tag: 正式版では null、開発中の版ではそのラベル
 - files: パスとバイト列の対応。バイト列は Uint8Array
 - libraries: 構成員ごとの、同じ形の戻り値
-- stats: fetched と cached。取得した件数と、手元で済んだ件数
+- stats: fetched と cached と total。取得した件数と、手元で済んだ件数と、全体の件数
 
 取得したファイルはマニフェストと照合します。照合が1つでも失敗したら例外になり、一部だけの結果は返りません。構成員も同じように照合します。
 

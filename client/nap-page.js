@@ -83,8 +83,8 @@ export function createNapPage(options = {}) {
     }
 
     // 版を取得して照合する。ref は版ID・版ID-ラベル・版コードのいずれか。
-    async function fetchVersion(ref) {
-        return client.fetchVersion(source, ref);
+    async function fetchVersion(ref, options) {
+        return client.fetchVersion(source, ref, options);
     }
 
     async function fetchLatest() {
