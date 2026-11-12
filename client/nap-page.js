@@ -87,6 +87,20 @@ export function createNapPage(options = {}) {
         return client.fetchVersion(source, ref, options);
     }
 
+    // 版の説明。配信サーバーの API から取得する。取得できなければ空を返す。
+    async function describe(versionId) {
+        try {
+            const fetcher = fetchImpl || globalThis.fetch;
+            if (!fetcher) return '';
+            const response = await fetcher(`${rawBase}/api/v1/repos/${source}/versions/${versionId}`);
+            if (!response || !response.ok) return '';
+            const data = await response.json();
+            return String((data && data.description) || '').trim();
+        } catch (_) {
+            return '';
+        }
+    }
+
     async function fetchLatest() {
         const newest = await latest();
         if (!newest) {
@@ -150,6 +164,7 @@ export function createNapPage(options = {}) {
         latest,
         checkUpdate,
         fetchVersion,
+        describe,
         fetchLatest,
         store,
         storedVersions,
