@@ -101,12 +101,12 @@ export function createNapPage(options = {}) {
         }
     }
 
-    async function fetchLatest() {
+    async function fetchLatest(options) {
         const newest = await latest();
         if (!newest) {
             throw new Error(`正式版はまだありません: ${source}`);
         }
-        return client.fetchVersion(source, newest.id);
+        return client.fetchVersion(source, newest.id, options);
     }
 
     function cacheName(versionId) {
