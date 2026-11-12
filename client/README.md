@@ -2,8 +2,6 @@
 
 NAP の版を取得するライブラリです。単一ファイルで、追加のパッケージは要りません。ブラウザと Node の両方で使えます。
 
-ブラウザでは module として読み込むか、読み込み後に NapClient を使います。NapClient には createClient と createMemoryCache と parseSpec があります。Node では ES モジュールとして import します。
-
 ## createClient
 
 ```js
