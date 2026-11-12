@@ -262,6 +262,7 @@ const OPENAPI = {
                     commit: { type: 'string', description: '版の専用コミット' },
                     source: { type: 'string', nullable: true, description: '出典コミット' },
                     at: { type: 'string', format: 'date-time', description: '発行日時' },
+                    description: { type: 'string', description: '版の説明' },
                 },
             },
             VersionDetail: {
@@ -451,6 +452,27 @@ async function isNapRepo(dir) {
     return entries.length > 0;
 }
 
+const descriptionCache = new Map();
+
+// 版の説明。専用コミットの本文がそのまま説明になる。コミットは変わらないため保持する。
+async function versionDescription(dir, entry) {
+    if (descriptionCache.has(entry.commit)) {
+        return descriptionCache.get(entry.commit);
+    }
+    let description = '';
+    try {
+        description = (await gitText(['log', '-1', '--format=%b', entry.commit], dir)).trim();
+    } catch {
+        return '';
+    }
+    descriptionCache.set(entry.commit, description);
+    return description;
+}
+
+async function presentEntryWithDescription(dir, entry) {
+    return { ...presentEntry(entry), description: await versionDescription(dir, entry) };
+}
+
 function presentEntry(entry) {
     return {
         id: entry.id,
@@ -627,7 +649,7 @@ async function handleRepoInfo(req, res, owner, repo) {
                     : '',
             declaration,
             versions: entries.length,
-            latest: latest ? presentEntry(latest) : null,
+            latest: latest ? await presentEntryWithDescription(dir, latest) : null,
         },
         'public, max-age=60',
     );
@@ -648,7 +670,9 @@ async function handleVersions(req, res, owner, repo) {
         {
             repo: `${owner}/${repo}`,
             latest: latest ? latest.id : null,
-            versions: entries.map(presentEntry),
+            versions: await Promise.all(
+                entries.map((entry) => presentEntryWithDescription(dir, entry)),
+            ),
         },
         'public, max-age=60',
     );
@@ -675,12 +699,7 @@ async function handleVersionDetail(req, res, owner, repo, refText) {
     } catch {
         manifest = null;
     }
-    let description = '';
-    try {
-        description = await gitText(['log', '-1', '--format=%b', entry.commit], dir);
-    } catch {
-        description = '';
-    }
+    const description = await versionDescription(dir, entry);
     sendJson(
         res,
         200,

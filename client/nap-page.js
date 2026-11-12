@@ -61,7 +61,7 @@ export function createNapPage(options = {}) {
     const client = givenClient || createClient({ rawBase, fetch: fetchImpl, cache });
     let currentVersionId = options.currentVersionId || null;
 
-    // 版の一覧。索引の順。各要素は { id, code, tag, commit, source, at }。
+    // 版の一覧。索引の順。各要素は { id, code, tag, commit, source, at, description }。
     async function versions() {
         const { entries } = await client.listVersions(source);
         return entries;

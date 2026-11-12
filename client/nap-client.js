@@ -249,6 +249,7 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
                         tag: entry.tag || null,
                         code: entry.code || null,
                         source: entry.source || null,
+                        description: entry.description || '',
                     }));
                     return { total: entries.length, entries };
                 }
