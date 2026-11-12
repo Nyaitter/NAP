@@ -123,6 +123,7 @@ source は必須です。rawBase と currentVersionId は任意です。rawBase 
 - latest: 最新の正式版を返す
 - checkUpdate: 更新があるかと最新の正式版を返す
 - fetchVersion: 版を取得する
+- describe: 版の説明を返す。取得できなければ空
 - fetchLatest: 最新の正式版を取得する
 - store: 取得した版をブラウザに保存する
 - storedVersions: 保存済みの版を返す
