@@ -245,6 +245,13 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
         return { id: hit.id, tag: hit.tag };
     }
 
+    function notifyProgress(stats) {
+        if (!stats || typeof stats.onProgress !== 'function') return;
+        try {
+            stats.onProgress({ fetched: stats.fetched, cached: stats.cached, total: stats.total || 0 });
+        } catch (_) {}
+    }
+
     async function fetchPackage(repo, versionId, tag, stats, fallbackToTest) {
         let manifest;
         try {
@@ -256,6 +263,10 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
             if (!hit) throw error;
             return fetchPackage(repo, versionId, hit.tag, stats, false);
         }
+        if (stats) {
+            stats.total = (stats.total || 0) + Object.keys(manifest.files).length;
+            notifyProgress(stats);
+        }
         const files = {};
         for (const rel of Object.keys(manifest.files).sort(compareTextBytes)) {
             const expected = manifest.files[rel];
@@ -263,6 +274,7 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
             if (hit) {
                 files[rel] = hit;
                 stats.cached += 1;
+                notifyProgress(stats);
                 continue;
             }
             const bytes = await fetchBytes(repo, tagRefFor(versionId, tag), rel);
@@ -275,6 +287,7 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
             await store.put(expected, bytes);
             files[rel] = bytes;
             stats.fetched += 1;
+            notifyProgress(stats);
         }
         const libraries = {};
         for (const ref of Object.keys(manifest.libraries).sort(compareTextBytes)) {
@@ -318,9 +331,9 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
     }
 
     // ref は「<版ID>」または「<版ID>-<ラベル>」。TestVersion を使うときは明示指定する。
-    async function fetchVersion(repo, ref) {
+    async function fetchVersion(repo, ref, options) {
         const { id, tag } = await resolveRef(repo, ref);
-        const stats = { fetched: 0, cached: 0 };
+        const stats = { fetched: 0, cached: 0, total: 0, onProgress: options && options.onProgress };
         const result = await fetchPackage(repo, id, tag, stats, false);
         return { ...result, stats };
     }
