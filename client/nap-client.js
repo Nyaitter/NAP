@@ -1,9 +1,8 @@
 // NAP のクライアント向け取得ライブラリ。
-// 索引 nap/index から版を探し、タグ先のマニフェストを取得して、
+// 索引から版を探し、タグ先のマニフェストを取得して、
 // 全ファイルのハッシュ照合と版IDの再計算が通ったときだけ完全なファイル集合を返す。
 // 取得先はソースで指定し、ソースは「<所有者>/<リポジトリ>」の形。
-// 既定の URL は raw.githubusercontent.com の形式でソースから導出する。
-// rawBase を渡したときは、その配信サーバーの専用 API を使う。
+// 既定では配信サーバーから取得する。rawBase に null を渡すと GitHub から直接取る。
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -292,6 +291,18 @@ export function createClient({ cache, fetch: fetchImpl, rawBase: rawBaseOption, 
         return results;
     }
 
+    // 索引の先頭ファイルを読む。置き場所はタグ nap-index を先に試し、
+    // 無ければ移行前のブランチ nap/index を使う。
+    async function readIndexHead(repo) {
+        try {
+            const text = await fetchText(repo, 'nap-index', 'index.json');
+            return { ref: 'nap-index', head: JSON.parse(text) };
+        } catch {
+            const text = await fetchText(repo, 'nap/index', 'index.json');
+            return { ref: 'nap/index', head: JSON.parse(text) };
+        }
+    }
+
     // 索引から版の一覧を返す。latestOnly では先頭ファイルと最後のチャンクだけを読む。
     // 各項目の tag は、正式版では null、TestVersion ではそのラベル。
     async function listVersions(repo, { latestOnly = false } = {}) {
@@ -326,10 +337,10 @@ export function createClient({ cache, fetch: fetchImpl, rawBase: rawBaseOption, 
                 return { total: entries.length, entries };
             } catch (_) {}
         }
-        const head = JSON.parse(await fetchText(repo, 'nap/index', 'index.json'));
+        const { ref: indexRef, head } = await readIndexHead(repo);
         const defs = latestOnly ? head.chunks.slice(-1) : head.chunks;
         const lists = await mapWithConcurrency(defs, async (def) =>
-            JSON.parse(textDecoder.decode(await fetchBytes(repo, 'nap/index', def.file))),
+            JSON.parse(textDecoder.decode(await fetchBytes(repo, indexRef, def.file))),
         );
         const entries = [];
         for (const list of lists) {
@@ -359,9 +370,9 @@ export function createClient({ cache, fetch: fetchImpl, rawBase: rawBaseOption, 
             }
             return null;
         }
-        const head = JSON.parse(await fetchText(repo, 'nap/index', 'index.json'));
+        const { ref: indexRef, head } = await readIndexHead(repo);
         for (let i = head.chunks.length - 1; i >= 0; i--) {
-            const list = JSON.parse(await fetchText(repo, 'nap/index', head.chunks[i].file));
+            const list = JSON.parse(await fetchText(repo, indexRef, head.chunks[i].file));
             for (let j = list.length - 1; j >= 0; j--) {
                 if (!list[j].tag) {
                     return { id: list[j].id, commit: list[j].commit, at: list[j].at, tag: null };

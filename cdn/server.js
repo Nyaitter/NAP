@@ -239,7 +239,7 @@ const OPENAPI = {
                         in: 'path',
                         required: true,
                         schema: { type: 'string' },
-                        description: '「<参照>/<ファイルのパス>」。参照は版ID、「版ID-ラベル」、版コード、タグやブランチの完全な名前、コミットのいずれか。完全な名前はたとえば nap/index',
+                        description: '「<参照>/<ファイルのパス>」。参照は版ID、「版ID-ラベル」、版コード、タグやブランチの完全な名前、コミットのいずれか。完全な名前はたとえば nap-index',
                     },
                 ],
                 responses: {
@@ -407,11 +407,12 @@ async function ensureRepo(owner, repo) {
         await git(['clone', '--mirror', '--quiet', `${UPSTREAM}/${owner}/${repo}.git`, tmp]);
         fs.renameSync(tmp, dir);
         lastFetchAt.set(key, Date.now());
+        declarationCache.delete(dir);
         return dir;
     });
 }
 
-async function fetchRepo(owner, repo, { miss = false } = {}) {
+async function fetchRepo(owner, repo, { miss = false, wait = true } = {}) {
     const key = repoKey(owner, repo);
     const dir = repoDir(owner, repo);
     const now = Date.now();
@@ -419,14 +420,17 @@ async function fetchRepo(owner, repo, { miss = false } = {}) {
     const interval = miss ? MISS_FETCH_INTERVAL_MS : FETCH_INTERVAL_MS;
     if (now - (table.get(key) || 0) < interval) return;
     table.set(key, now);
-    await withRepoLock(key, async () => {
+    const job = withRepoLock(key, async () => {
         try {
             await git(['fetch', '--prune', '--quiet', 'origin'], dir);
             lastFetchAt.set(key, Date.now());
+            declarationCache.delete(dir);
         } catch {
             // 取り寄せに失敗しても、手元の内容で配信を続ける。
         }
     });
+    if (wait) await job;
+    else job.catch(() => {});
 }
 
 // ---- 索引と宣言 ----
@@ -436,9 +440,13 @@ const indexCache = new Map();
 async function readIndex(dir) {
     let headSha = null;
     try {
-        headSha = await gitText(['rev-parse', '--verify', '--quiet', 'refs/heads/nap/index'], dir);
+        headSha = await gitText(['rev-parse', '--verify', '--quiet', 'refs/tags/nap-index'], dir);
     } catch {
-        return { entries: [], headSha: null };
+        try {
+            headSha = await gitText(['rev-parse', '--verify', '--quiet', 'refs/heads/nap/index'], dir);
+        } catch {
+            return { entries: [], headSha: null };
+        }
     }
     const cached = indexCache.get(dir);
     if (cached && cached.headSha === headSha) return cached;
@@ -453,15 +461,22 @@ async function readIndex(dir) {
     return result;
 }
 
+const declarationCache = new Map();
+
+// 宣言。取り寄せで内容が変わるまで保持する。
 async function readDeclaration(dir) {
+    if (declarationCache.has(dir)) return declarationCache.get(dir);
+    let doc = null;
     try {
         const headRef = await gitText(['symbolic-ref', '--quiet', 'HEAD'], dir);
         const text = await gitText(['show', `${headRef}:nap.json`], dir);
-        const doc = JSON.parse(text);
-        return doc && typeof doc === 'object' ? doc : null;
+        const parsed = JSON.parse(text);
+        doc = parsed && typeof parsed === 'object' ? parsed : null;
     } catch {
-        return null;
+        doc = null;
     }
+    declarationCache.set(dir, doc);
+    return doc;
 }
 
 // NAP のリポジトリかどうか。宣言か版があればよい。
@@ -650,7 +665,7 @@ async function handleRaw(req, res, owner, repo, rest) {
 
 async function handleRepoInfo(req, res, owner, repo, style) {
     const dir = await ensureRepo(owner, repo);
-    await fetchRepo(owner, repo);
+    await fetchRepo(owner, repo, { wait: false });
     if (!(await isNapRepo(dir))) {
         sendError(res, 404, 'NAP のリポジトリではありません');
         return;
@@ -680,7 +695,7 @@ async function handleRepoInfo(req, res, owner, repo, style) {
 
 async function handleVersions(req, res, owner, repo, style, url) {
     const dir = await ensureRepo(owner, repo);
-    await fetchRepo(owner, repo);
+    await fetchRepo(owner, repo, { wait: false });
     if (!(await isNapRepo(dir))) {
         sendError(res, 404, 'NAP のリポジトリではありません');
         return;
@@ -728,7 +743,7 @@ async function handleVersions(req, res, owner, repo, style, url) {
 
 async function handleVersionDetail(req, res, owner, repo, refText, style) {
     const dir = await ensureRepo(owner, repo);
-    await fetchRepo(owner, repo);
+    await fetchRepo(owner, repo, { wait: false });
     if (!(await isNapRepo(dir))) {
         sendError(res, 404, 'NAP のリポジトリではありません');
         return;
@@ -739,6 +754,26 @@ async function handleVersionDetail(req, res, owner, repo, refText, style) {
         sendError(res, 404, '版が見つかりません');
         return;
     }
+    const manifest = await versionManifest(dir, entry);
+    const description = await versionDescription(dir, entry);
+    sendJson(
+        res,
+        200,
+        {
+            repo: `${owner}/${repo}`,
+            ...presentEntry(entry, style),
+            description,
+            manifest,
+        },
+        'public, max-age=31536000, immutable',
+    );
+}
+
+const manifestCache = new Map();
+
+// 版のマニフェストと各ファイルの大きさ。版は不変なので保持する。
+async function versionManifest(dir, entry) {
+    if (manifestCache.has(entry.commit)) return manifestCache.get(entry.commit);
     let manifest = null;
     try {
         manifest = JSON.parse(
@@ -760,18 +795,11 @@ async function handleVersionDetail(req, res, owner, repo, refText, style) {
             manifest.sizes = sizes;
         } catch {}
     }
-    const description = await versionDescription(dir, entry);
-    sendJson(
-        res,
-        200,
-        {
-            repo: `${owner}/${repo}`,
-            ...presentEntry(entry, style),
-            description,
-            manifest,
-        },
-        'public, max-age=31536000, immutable',
-    );
+    if (manifestCache.size >= 256) {
+        manifestCache.delete(manifestCache.keys().next().value);
+    }
+    manifestCache.set(entry.commit, manifest);
+    return manifest;
 }
 
 function resolveEntry(entries, refText) {
