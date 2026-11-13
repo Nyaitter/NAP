@@ -14,7 +14,7 @@ const client = createClient({
 
 指定できるもの:
 
-- rawBase: 取得先の基底 URL。nap-cdn のような配信サーバーを使うときに指定する
+- rawBase: 取得先の基底 URL。省略すると配信サーバーから取得する。GitHub から直接取るときは null を渡す
 - cache: get と put を持つオブジェクト。省略するとメモリ上のものになる
 - fetch: 取得に使う fetch。省略すると標準の fetch を使う
 
@@ -84,7 +84,7 @@ const version = await client.fetchVersion(repo, ref);
 
 第3引数に onProgress を渡すと、取得の進み具合が phase と fetched と cached と total の形で通知されます。phase は download と unpack のどちらかです。
 
-rawBase を渡したクライアントは、配信サーバーの専用 API で版の一覧を取り、版のファイルは ZIP で一括取得します。ZIP の取得や展開に失敗したときは、ファイルごとの取得に切り替わります。ZIP の取得中は、進捗の bytes と bytesTotal に受信バイト数と全体のバイト数が入ります。
+配信サーバー経由のクライアントは、専用 API で版の一覧を取り、版のファイルは ZIP で一括取得します。ZIP の取得や展開に失敗したときは、ファイルごとの取得に切り替わります。ZIP の取得中は、進捗の bytes と bytesTotal に受信バイト数と全体のバイト数が入ります。
 
 戻り値は versionId と tag と files と libraries と stats です。
 

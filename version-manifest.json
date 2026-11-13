@@ -1,7 +1,7 @@
 {
   "files": {
-    "client/README.md": "56ac15ab56c2eb6213d5470d51c388dd0cd0f759df47c5a0a273f8db111e0fb0",
-    "client/nap-client.js": "9e50624891e47cbf3f718f8656d8a3fadfcc3d049a83ee60f807e74bf984deba",
+    "client/README.md": "0ae724c50d018178a78ad07cb3b353844d3bb48796b0f59a0145e6e1ff5f7f0f",
+    "client/nap-client.js": "e578d9ce072702bef332dae25988f73c1ad906a85168c96d7a420ae459ec68ca",
     "client/nap-page.js": "4d2c73ca80c34606e02b9c375c58bf16ba6dfa4bbbded4d25ccac573f67b7131",
     "client/package.json": "2398a67264beba1673913490ad4015161337352eb7dd4534157762ff7d9448da"
   },
