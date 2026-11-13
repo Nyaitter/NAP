@@ -85,7 +85,19 @@ const OPENAPI = {
                 },
             },
         },
-        '/api/v1/repos/{owner}/{repo}': {
+        '/api/spec': {
+            get: {
+                summary: '仕様書',
+                operationId: 'getSpec',
+                responses: {
+                    '200': {
+                        description: 'この OpenAPI 文書',
+                        content: { 'application/json': { schema: { type: 'object' } } },
+                    },
+                },
+            },
+        },
+        '/api/repos/{owner}/{repo}': {
             get: {
                 summary: 'パッケージの情報',
                 operationId: 'getRepo',
@@ -102,29 +114,31 @@ const OPENAPI = {
                 },
             },
         },
-        '/api/v1/repos/{owner}/{repo}/versions': {
+        '/api/repos/{owner}/{repo}/versions': {
             get: {
                 summary: '版の一覧',
                 operationId: 'listVersions',
                 parameters: [
                     { name: 'owner', in: 'path', required: true, schema: { type: 'string' } },
                     { name: 'repo', in: 'path', required: true, schema: { type: 'string' } },
+                    { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 30, maximum: 100 }, description: '一度に返す数' },
+                    { name: 'cursor', in: 'query', required: false, schema: { type: 'string' }, description: '続きを取得するための位置。前の応答の next_cursor' },
                 ],
                 responses: {
                     '200': {
-                        description: '発行順の版の一覧と、最新の正式版の版ID',
+                        description: '新しい順の版の一覧',
                         content: {
                             'application/json': {
                                 schema: {
                                     type: 'object',
-                                    required: ['repo', 'latest', 'versions'],
+                                    required: ['versions', 'has_next', 'next_cursor'],
                                     properties: {
-                                        repo: { type: 'string' },
-                                        latest: { type: 'string', nullable: true },
                                         versions: {
                                             type: 'array',
                                             items: { $ref: '#/components/schemas/VersionEntry' },
                                         },
+                                        has_next: { type: 'boolean' },
+                                        next_cursor: { type: 'string', nullable: true },
                                     },
                                 },
                             },
@@ -134,7 +148,7 @@ const OPENAPI = {
                 },
             },
         },
-        '/api/v1/repos/{owner}/{repo}/versions/{ref}': {
+        '/api/repos/{owner}/{repo}/versions/{ref}': {
             get: {
                 summary: '版の詳細',
                 operationId: 'getVersion',
@@ -158,7 +172,7 @@ const OPENAPI = {
                 },
             },
         },
-        '/api/v1/repos/{owner}/{repo}/versions/{ref}/archive.zip': {
+        '/api/repos/{owner}/{repo}/versions/{ref}/archive.zip': {
             get: {
                 summary: '版の ZIP',
                 operationId: 'getVersionArchive',
@@ -182,7 +196,7 @@ const OPENAPI = {
                 },
             },
         },
-        '/api/v1/search': {
+        '/api/search': {
             get: {
                 summary: 'パッケージの検索',
                 operationId: 'searchPackages',
@@ -197,14 +211,14 @@ const OPENAPI = {
                             'application/json': {
                                 schema: {
                                     type: 'object',
-                                    required: ['query', 'total', 'results'],
+                                    required: ['packages', 'total', 'has_next'],
                                     properties: {
-                                        query: { type: 'string' },
-                                        total: { type: 'integer', description: '候補の総数' },
-                                        results: {
+                                        packages: {
                                             type: 'array',
                                             items: { $ref: '#/components/schemas/SearchResult' },
                                         },
+                                        total: { type: 'integer', description: '候補の総数' },
+                                        has_next: { type: 'boolean' },
                                     },
                                 },
                             },
@@ -253,7 +267,7 @@ const OPENAPI = {
             },
             VersionEntry: {
                 type: 'object',
-                required: ['id', 'code', 'tag', 'test', 'commit', 'source', 'at'],
+                required: ['id', 'code', 'tag', 'test', 'commit', 'source', 'created_at'],
                 properties: {
                     id: { type: 'string', description: '版ID' },
                     code: { type: 'string', nullable: true, description: '版コード' },
@@ -261,7 +275,7 @@ const OPENAPI = {
                     test: { type: 'boolean', description: '開発中の版かどうか' },
                     commit: { type: 'string', description: '版の専用コミット' },
                     source: { type: 'string', nullable: true, description: '出典コミット' },
-                    at: { type: 'string', format: 'date-time', description: '発行日時' },
+                    created_at: { type: 'string', format: 'date-time', description: '発行日時' },
                     description: { type: 'string', description: '版の説明' },
                 },
             },
@@ -288,6 +302,11 @@ const OPENAPI = {
                                         description: '構成員',
                                         additionalProperties: { type: 'object' },
                                     },
+                                    sizes: {
+                                        type: 'object',
+                                        description: 'ファイルのパスとバイト数',
+                                        additionalProperties: { type: 'integer' },
+                                    },
                                 },
                             },
                         },
@@ -296,24 +315,24 @@ const OPENAPI = {
             },
             RepoInfo: {
                 type: 'object',
-                required: ['repo', 'name', 'description', 'declaration', 'versions', 'latest'],
+                required: ['repo', 'name', 'description', 'declaration', 'version_count', 'latest'],
                 properties: {
                     repo: { type: 'string' },
                     name: { type: 'string', description: 'パッケージ名' },
                     description: { type: 'string' },
                     declaration: { type: 'object', nullable: true, description: 'nap.json の内容' },
-                    versions: { type: 'integer', description: '版の総数' },
+                    version_count: { type: 'integer', description: '版の総数' },
                     latest: { $ref: '#/components/schemas/VersionEntry', nullable: true },
                 },
             },
             SearchResult: {
                 type: 'object',
-                required: ['repo', 'name', 'description', 'members'],
+                required: ['repo', 'name', 'description', 'member_count'],
                 properties: {
                     repo: { type: 'string' },
                     name: { type: 'string' },
                     description: { type: 'string' },
-                    members: { type: 'integer', description: '構成員の数' },
+                    member_count: { type: 'integer', description: '構成員の数' },
                 },
             },
         },
@@ -469,20 +488,22 @@ async function versionDescription(dir, entry) {
     return description;
 }
 
-async function presentEntryWithDescription(dir, entry) {
-    return { ...presentEntry(entry), description: await versionDescription(dir, entry) };
+async function presentEntryWithDescription(dir, entry, style) {
+    return { ...presentEntry(entry, style), description: await versionDescription(dir, entry) };
 }
 
-function presentEntry(entry) {
-    return {
+function presentEntry(entry, style) {
+    const presented = {
         id: entry.id,
         code: entry.code || null,
         tag: entry.tag || null,
         test: Boolean(entry.tag),
         commit: entry.commit,
         source: entry.source || null,
-        at: entry.at,
     };
+    if (style === 'api') presented.created_at = entry.at;
+    else presented.at = entry.at;
+    return presented;
 }
 
 function latestOf(entries) {
@@ -627,7 +648,7 @@ async function handleRaw(req, res, owner, repo, rest) {
     sendError(res, 404, '見つかりません');
 }
 
-async function handleRepoInfo(req, res, owner, repo) {
+async function handleRepoInfo(req, res, owner, repo, style) {
     const dir = await ensureRepo(owner, repo);
     await fetchRepo(owner, repo);
     if (!(await isNapRepo(dir))) {
@@ -648,14 +669,16 @@ async function handleRepoInfo(req, res, owner, repo) {
                     ? declaration.description
                     : '',
             declaration,
-            versions: entries.length,
-            latest: latest ? await presentEntryWithDescription(dir, latest) : null,
+            ...(style === 'api'
+                ? { version_count: entries.length }
+                : { versions: entries.length }),
+            latest: latest ? await presentEntryWithDescription(dir, latest, style) : null,
         },
         'public, max-age=60',
     );
 }
 
-async function handleVersions(req, res, owner, repo) {
+async function handleVersions(req, res, owner, repo, style, url) {
     const dir = await ensureRepo(owner, repo);
     await fetchRepo(owner, repo);
     if (!(await isNapRepo(dir))) {
@@ -663,22 +686,47 @@ async function handleVersions(req, res, owner, repo) {
         return;
     }
     const { entries } = await readIndex(dir);
-    const latest = latestOf(entries);
+    if (style !== 'api') {
+        const latest = latestOf(entries);
+        sendJson(
+            res,
+            200,
+            {
+                repo: `${owner}/${repo}`,
+                latest: latest ? latest.id : null,
+                versions: await Promise.all(
+                    entries.map((entry) => presentEntryWithDescription(dir, entry, style)),
+                ),
+            },
+            'public, max-age=60',
+        );
+        return;
+    }
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit'), 10) || 30, 1), 100);
+    const cursor = url.searchParams.get('cursor');
+    const ordered = [...entries].reverse();
+    let start = 0;
+    if (cursor) {
+        const at = ordered.findIndex((entry) => entry.id === cursor);
+        if (at >= 0) start = at + 1;
+    }
+    const page = ordered.slice(start, start + limit);
+    const hasNext = start + page.length < ordered.length;
     sendJson(
         res,
         200,
         {
-            repo: `${owner}/${repo}`,
-            latest: latest ? latest.id : null,
             versions: await Promise.all(
-                entries.map((entry) => presentEntryWithDescription(dir, entry)),
+                page.map((entry) => presentEntryWithDescription(dir, entry, style)),
             ),
+            has_next: hasNext,
+            next_cursor: hasNext && page.length > 0 ? page[page.length - 1].id : null,
         },
         'public, max-age=60',
     );
 }
 
-async function handleVersionDetail(req, res, owner, repo, refText) {
+async function handleVersionDetail(req, res, owner, repo, refText, style) {
     const dir = await ensureRepo(owner, repo);
     await fetchRepo(owner, repo);
     if (!(await isNapRepo(dir))) {
@@ -699,13 +747,26 @@ async function handleVersionDetail(req, res, owner, repo, refText) {
     } catch {
         manifest = null;
     }
+    if (manifest && manifest.files) {
+        try {
+            const tree = await gitText(['ls-tree', '-r', '-l', '-z', entry.commit], dir);
+            const sizes = {};
+            for (const record of tree.split('\0')) {
+                const match = /^\d+ blob [0-9a-f]+\s+(\d+)\t(.+)$/.exec(record);
+                if (match && Object.prototype.hasOwnProperty.call(manifest.files, match[2])) {
+                    sizes[match[2]] = Number(match[1]);
+                }
+            }
+            manifest.sizes = sizes;
+        } catch {}
+    }
     const description = await versionDescription(dir, entry);
     sendJson(
         res,
         200,
         {
             repo: `${owner}/${repo}`,
-            ...presentEntry(entry),
+            ...presentEntry(entry, style),
             description,
             manifest,
         },
@@ -787,7 +848,7 @@ async function handleVersionArchive(req, res, owner, repo, refText) {
     fs.createReadStream(file).pipe(res);
 }
 
-async function handleSearch(req, res, url) {
+async function handleSearch(req, res, url, style) {
     // nap search と同じ動作。GitHub のコード検索で nap.json を持つ
     // リポジトリを探し、各リポジトリの nap.json を読んで返す。
     const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '';
@@ -868,12 +929,26 @@ async function handleSearch(req, res, url) {
         }
         results.push({ repo: candidate.repo, name, description, members });
     }
-    sendJson(
-        res,
-        200,
-        { query: q, total: data.total_count || results.length, results },
-        'public, max-age=60',
-    );
+    const total = data.total_count || results.length;
+    if (style === 'api') {
+        sendJson(
+            res,
+            200,
+            {
+                packages: results.map((result) => ({
+                    repo: result.repo,
+                    name: result.name,
+                    description: result.description,
+                    member_count: result.members,
+                })),
+                total,
+                has_next: total > results.length,
+            },
+            'public, max-age=60',
+        );
+        return;
+    }
+    sendJson(res, 200, { query: q, total, results }, 'public, max-age=60');
 }
 
 async function handle(req, res) {
@@ -904,31 +979,42 @@ async function handle(req, res) {
         return;
     }
     try {
-        if (segments[0] === 'api' && segments[1] === 'v1') {
-            if (segments[2] === 'search' && segments.length === 3) {
-                await handleSearch(req, res, url);
+        if (segments[0] === 'api') {
+            let style = 'api';
+            let rest = segments.slice(1);
+            if (rest[0] === 'v1') {
+                style = 'legacy';
+                rest = rest.slice(1);
+            }
+            if (style === 'api' && rest.length === 1 && rest[0] === 'spec') {
+                sendJson(res, 200, OPENAPI, 'public, max-age=300');
                 return;
             }
-            if (segments[2] === 'repos' && segments.length >= 5) {
-                const [, , , owner, repo] = segments;
+            if (rest.length === 1 && rest[0] === 'search') {
+                await handleSearch(req, res, url, style);
+                return;
+            }
+            if (rest[0] === 'repos' && rest.length >= 3) {
+                const owner = rest[1];
+                const repo = rest[2];
                 if (!SEGMENT_PATTERN.test(owner) || !SEGMENT_PATTERN.test(repo)) {
                     sendError(res, 400, 'リポジトリの指定が不正です');
                     return;
                 }
-                if (segments.length === 5) {
-                    await handleRepoInfo(req, res, owner, repo);
+                if (rest.length === 3) {
+                    await handleRepoInfo(req, res, owner, repo, style);
                     return;
                 }
-                if (segments.length === 6 && segments[5] === 'versions') {
-                    await handleVersions(req, res, owner, repo);
+                if (rest.length === 4 && rest[3] === 'versions') {
+                    await handleVersions(req, res, owner, repo, style, url);
                     return;
                 }
-                if (segments[5] === 'versions' && segments.length === 8 && segments[7] === 'archive.zip') {
-                    await handleVersionArchive(req, res, owner, repo, segments[6]);
+                if (rest[3] === 'versions' && rest.length === 6 && rest[5] === 'archive.zip') {
+                    await handleVersionArchive(req, res, owner, repo, rest[4]);
                     return;
                 }
-                if (segments[5] === 'versions' && segments.length === 7) {
-                    await handleVersionDetail(req, res, owner, repo, segments[6]);
+                if (rest[3] === 'versions' && rest.length === 5) {
+                    await handleVersionDetail(req, res, owner, repo, rest[4], style);
                     return;
                 }
             }
