@@ -92,7 +92,7 @@ export function createNapPage(options = {}) {
         try {
             const fetcher = fetchImpl || globalThis.fetch;
             if (!fetcher) return '';
-            const response = await fetcher(`${rawBase}/api/v1/repos/${source}/versions/${versionId}`);
+            const response = await fetcher(`${rawBase}/api/repos/${source}/versions/${versionId}`);
             if (!response || !response.ok) return '';
             const data = await response.json();
             return String((data && data.description) || '').trim();

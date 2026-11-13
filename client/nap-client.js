@@ -186,7 +186,13 @@ function validateManifest(manifest) {
             throw new Error(`マニフェストの構成員が不正です: ${ref}`);
         }
     }
-    return { files, libraries };
+    const sizes = manifest.sizes || {};
+    for (const [rel, size] of Object.entries(sizes)) {
+        if (!Number.isInteger(size) || size < 0) {
+            throw new Error(`マニフェストのファイルサイズが不正です: ${rel}`);
+        }
+    }
+    return { files, libraries, sizes };
 }
 
 // ハッシュ単位のキャッシュの単純な実装。差し替えの見本として置く。
@@ -208,7 +214,7 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
     const viaApi = Boolean(rawBase);
 
     function apiUrlFor(repo, suffix) {
-        return `${String(rawBase).replace(/\/+$/, '')}/api/v1/repos/${repo}${suffix}`;
+        return `${String(rawBase).replace(/\/+$/, '')}/api/repos/${repo}${suffix}`;
     }
 
     // ソースから導出した URL で取得し、応答のバイト列を返す。
@@ -238,21 +244,33 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
     async function listVersions(repo, { latestOnly = false } = {}) {
         if (viaApi) {
             try {
-                const res = await doFetch(apiUrlFor(repo, '/versions'));
-                if (res && res.ok) {
+                const entries = [];
+                let cursor = null;
+                for (;;) {
+                    const suffix = cursor
+                        ? `/versions?limit=100&cursor=${encodeURIComponent(cursor)}`
+                        : '/versions?limit=100';
+                    const res = await doFetch(apiUrlFor(repo, suffix));
+                    if (!res || !res.ok) throw new Error(`HTTP ${res ? res.status : '?'}`);
                     const data = await res.json();
                     const list = Array.isArray(data) ? data : data.versions || [];
-                    const entries = list.map((entry) => ({
-                        id: entry.id,
-                        commit: entry.commit,
-                        at: entry.at,
-                        tag: entry.tag || null,
-                        code: entry.code || null,
-                        source: entry.source || null,
-                        description: entry.description || '',
-                    }));
-                    return { total: entries.length, entries };
+                    for (const entry of list) {
+                        entries.push({
+                            id: entry.id,
+                            commit: entry.commit,
+                            at: entry.created_at || entry.at,
+                            tag: entry.tag || null,
+                            code: entry.code || null,
+                            source: entry.source || null,
+                            description: entry.description || '',
+                        });
+                    }
+                    if (latestOnly || !data || !data.has_next || !data.next_cursor) break;
+                    cursor = data.next_cursor;
                 }
+                // API は新しい順に返す。内部では索引と同じ古い順にそろえる。
+                entries.reverse();
+                return { total: entries.length, entries };
             } catch (_) {}
         }
         const head = JSON.parse(await fetchText(repo, 'nap/index', 'index.json'));
@@ -297,15 +315,42 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
         return null;
     }
 
-    async function fetchManifest(repo, versionId, tag, stats) {
-        const text = await fetchText(repo, pathRefFor(versionId, tag, viaApi), 'version-manifest.json');
-        if (stats) stats.fetched += 1;
-        let raw;
+    // 配信サーバー経由では、版の詳細からマニフェストを受け取る。ファイルのサイズも一緒に返る。
+    async function fetchManifestRawViaApi(repo, versionId, tag) {
+        const ref = pathRefFor(versionId, tag, true);
+        let lastError = null;
         try {
-            raw = JSON.parse(text);
-        } catch {
-            throw new Error('マニフェストが JSON として読めません。');
+            const res = await doFetch(apiUrlFor(repo, `/versions/${ref}`));
+            if (res && res.ok) {
+                const data = await res.json();
+                if (data && data.manifest) return data.manifest;
+                lastError = new Error('マニフェストが含まれていません');
+            } else {
+                lastError = new Error(`HTTP ${res ? res.status : '?'}`);
+            }
+        } catch (error) {
+            lastError = error;
         }
+        const error = new Error(
+            `取得できませんでした: ${repo} ${ref} version-manifest.json: ${lastError ? lastError.message : '不明'}`,
+        );
+        error.napFetchFailed = true;
+        throw error;
+    }
+
+    async function fetchManifest(repo, versionId, tag, stats) {
+        let raw;
+        if (viaApi) {
+            raw = await fetchManifestRawViaApi(repo, versionId, tag);
+        } else {
+            const text = await fetchText(repo, pathRefFor(versionId, tag, viaApi), 'version-manifest.json');
+            try {
+                raw = JSON.parse(text);
+            } catch {
+                throw new Error('マニフェストが JSON として読めません。');
+            }
+        }
+        if (stats) stats.fetched += 1;
         const manifest = validateManifest(raw);
         const recomputed = await computeVersionId(manifest.files, manifest.libraries);
         if (recomputed !== versionId) {
@@ -359,6 +404,8 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
             const reader = res.body.getReader();
             const chunks = [];
             let received = 0;
+            const baseFetched = stats ? stats.byteFetched || 0 : 0;
+            const baseTotal = stats ? stats.byteTotal || 0 : 0;
             const lengthHeader =
                 res.headers && typeof res.headers.get === 'function'
                     ? Number(res.headers.get('content-length')) || 0
@@ -370,8 +417,8 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
                 received += value.length;
                 if (stats) {
                     stats.phase = 'download';
-                    stats.byteFetched = received;
-                    stats.byteTotal = lengthHeader;
+                    stats.byteFetched = baseFetched + received;
+                    stats.byteTotal = baseTotal + lengthHeader;
                     notifyProgress(stats);
                 }
             }
@@ -423,25 +470,41 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
         }
         let files = null;
         if (viaApi) {
+            const byteFetchedBefore = stats ? stats.byteFetched || 0 : 0;
+            const byteTotalBefore = stats ? stats.byteTotal || 0 : 0;
             try {
                 files = await fetchPackageFilesViaZip(repo, versionId, tag, manifest, stats);
             } catch (_) {
                 files = null;
+                if (stats) {
+                    stats.byteFetched = byteFetchedBefore;
+                    stats.byteTotal = byteTotalBefore;
+                }
             }
         }
         if (!files) {
             if (stats) {
                 stats.phase = 'download';
                 stats.total = (stats.total || 0) + Object.keys(manifest.files).length;
+                let byteTotal = 0;
+                for (const rel of Object.keys(manifest.files)) {
+                    const size = manifest.sizes ? manifest.sizes[rel] : undefined;
+                    if (Number.isInteger(size) && size >= 0) byteTotal += size;
+                }
+                stats.byteTotal = (stats.byteTotal || 0) + byteTotal;
                 notifyProgress(stats);
             }
             files = {};
             for (const rel of Object.keys(manifest.files).sort(compareTextBytes)) {
             const expected = manifest.files[rel];
+            const size = manifest.sizes ? manifest.sizes[rel] : undefined;
             const hit = await store.get(expected);
             if (hit) {
                 files[rel] = hit;
                 stats.cached += 1;
+                if (stats && Number.isInteger(size)) {
+                    stats.byteFetched = (stats.byteFetched || 0) + size;
+                }
                 notifyProgress(stats);
                 continue;
             }
@@ -455,6 +518,7 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
             await store.put(expected, bytes);
             files[rel] = bytes;
             stats.fetched += 1;
+            if (stats) stats.byteFetched = (stats.byteFetched || 0) + bytes.length;
             notifyProgress(stats);
             }
         }
