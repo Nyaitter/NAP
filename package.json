@@ -1,1 +1,19 @@
-{"bin":{"nap":"./cli.js"},"description":"NAP の CLI と、クライアント向け取得ライブラリです。Git 拡張方式の発行を行います。","engines":{"node":">=20"},"name":"nap","private":true,"version":"0.2.0"}
+{
+  "bin": {
+    "nap": "./cli.js"
+  },
+  "description": "NAP の CLI と、クライアント向け取得ライブラリです。Git 拡張方式の発行を行います。",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "cli.js",
+    "lib",
+    "client"
+  ],
+  "name": "@nyaitter/nap",
+  "publishConfig": {
+    "access": "public"
+  },
+  "version": "0.3.0"
+}

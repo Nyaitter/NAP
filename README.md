@@ -5,14 +5,16 @@
 ## インストール
 
 ```bash
-git clone https://github.com/Nyaitter/NAP.git
+npm install -g @nyaitter/nap
 ```
 
-clone したフォルダの cli.js が本体です。npm link で nap コマンドとして登録できます。npx からも使えます。
+nap コマンドとして使えるようになります。npx からも使えます。
 
 ```console
-$ npx github:Nyaitter/NAP publish
+$ npx @nyaitter/nap publish
 ```
+
+ソースから使う場合は、clone したフォルダで ./install.sh を実行します。
 
 ## 使い始める
 
@@ -70,6 +72,14 @@ $ nap get Nyaitter/Client/<版コード>
 
 指定がなければ、最新の正式版です。取り寄せた内容は照合してから置きます。置き場所は --out <ディレクトリ> で指定できます。既定はリポジトリ名のフォルダです。一緒に使うパッケージも一緒に置かれます。
 
+ホームの置き場所へ入れるときは --global を付けます。
+
+```console
+$ nap get Nyaitter/Client --global
+```
+
+置き場所は既定で ~/nap です。環境変数 NAP_GLOBAL_DIR で変えられます。
+
 ### プロジェクトへ導入する
 
 nap.json のあるフォルダで、--out を付けずに実行すると導入になります。
@@ -84,6 +94,22 @@ nap get を指定なしで実行すると、記録されたものをすべて導
 
 発行するときは、記録されたパッケージが版に含まれます。版は単独で使えます。
 
+### 取得時に実行するスクリプト
+
+nap.json の scripts.get に、取得のあとに実行するコマンドを書けます。
+
+```json
+{
+  "name": "my-project",
+  "include": ["**"],
+  "scripts": {
+    "get": "echo $NAP_DEST に置きました"
+  }
+}
+```
+
+スクリプトには、置き場所のパスが NAP_DEST として渡ります。--global で入れたときは NAP_GLOBAL が 1 になります。
+
 ## 版を調べる
 
 ```console
@@ -92,7 +118,14 @@ $ nap show <版ID>
 $ nap show <版コード>
 ```
 
-nap list は版の一覧を出します。nap show は、指定がなければ最新の正式版を出します。版IDは先頭だけでも指定できます。
+nap list は版の一覧を出します。nap show は、指定がなければ最新の正式版を出します。版IDは先頭だけでも指定できます。対象は --repo <所有者>/<リポジトリ> で指定できます。
+
+```console
+$ nap list Nyaitter/Client
+$ nap show --repo Nyaitter/Client
+```
+
+対象を省くと、このフォルダの Git リポジトリの対象になります。Git の無い環境では、対象を指定してください。
 
 ## パッケージを探す
 
@@ -134,6 +167,14 @@ $ nap get Nyaitter/Client/<版ID>-<ラベル>
 ## 非公開の版
 
 非公開の版はありません。正式に出す前に試してもらいたいときは、開発中の版を使ってください。版そのものを非公開にしたいときは、プライベートリポジトリなど、置き場所側の仕組みを使ってください。
+
+## 配信サーバー
+
+既定では配信サーバー経由で取得します。ZIP で一括取得するため速くなります。GitHub から直接取得する場合は、環境変数 NAP_DIRECT を設定します。別の配信サーバーを使う場合は、環境変数 NAP_RAW_BASE にその URL を設定します。
+
+```console
+$ NAP_RAW_BASE=https://cdn.example.jp nap get Nyaitter/Client
+```
 
 ## ドキュメント
 

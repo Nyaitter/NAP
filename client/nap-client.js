@@ -208,10 +208,32 @@ export function createMemoryCache() {
     };
 }
 
-export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
+const DEFAULT_RAW_BASE = 'https://cdn.nyaitter.jp';
+
+// 取得先を決める。指定が無ければ配信サーバーを使う。null や空文字では
+// GitHub から直接取る。NAP_RAW_BASE と NAP_DIRECT は CLI からの指定に使う。
+function resolveRawBase(rawBase) {
+    if (rawBase !== undefined) return rawBase || null;
+    const env = typeof process !== 'undefined' && process.env ? process.env : {};
+    if (env.NAP_DIRECT) return null;
+    if (env.NAP_RAW_BASE) return env.NAP_RAW_BASE;
+    return DEFAULT_RAW_BASE;
+}
+
+export function createClient({ cache, fetch: fetchImpl, rawBase: rawBaseOption, concurrency } = {}) {
     const doFetch = fetchImpl || ((...args) => globalThis.fetch(...args));
     const store = cache || createMemoryCache();
+    const rawBase = resolveRawBase(rawBaseOption);
     const viaApi = Boolean(rawBase);
+    const workers = Math.max(
+        1,
+        Math.min(
+            64,
+            Number(concurrency) ||
+                (typeof process !== 'undefined' && process.env && Number(process.env.NAP_CONCURRENCY)) ||
+                8,
+        ),
+    );
 
     function apiUrlFor(repo, suffix) {
         return `${String(rawBase).replace(/\/+$/, '')}/api/repos/${repo}${suffix}`;
@@ -220,23 +242,54 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
     // ソースから導出した URL で取得し、応答のバイト列を返す。
     async function fetchBytes(repo, ref, filePath) {
         const url = `${rawBaseFor(repo, rawBase)}/${ref}/${filePath}`;
-        let lastError = null;
         try {
             const res = await doFetch(url);
-            if (res && res.ok) return new Uint8Array(await res.arrayBuffer());
-            lastError = new Error(`HTTP ${res ? res.status : '?'}`);
+            if (!res || !res.ok) {
+                const error = new Error(
+                    `${repo} を取得できませんでした。${filePath} が見つかりません。URL を確認してください`,
+                );
+                error.napFetchFailed = true;
+                throw error;
+            }
+            return new Uint8Array(await res.arrayBuffer());
         } catch (error) {
-            lastError = error;
+            if (error && error.napFetchFailed) throw error;
+            const wrapped = new Error(
+                `${repo} に接続できませんでした。ネットワークを確認してください`,
+            );
+            wrapped.napFetchFailed = true;
+            throw wrapped;
         }
-        const error = new Error(
-            `取得できませんでした: ${repo} ${ref} ${filePath}: ${lastError ? lastError.message : '不明'}`,
-        );
-        error.napFetchFailed = true;
-        throw error;
     }
 
     async function fetchText(repo, ref, filePath) {
         return textDecoder.decode(await fetchBytes(repo, ref, filePath));
+    }
+
+    // 前後の時間を計る必要はなく、順序も問わない一括処理を並列で回す。
+    // 失敗が1つでもあれば、その時点で全体として失敗にする。
+    async function mapWithConcurrency(items, worker) {
+        const results = new Array(items.length);
+        let cursor = 0;
+        let failure = null;
+        const run = async () => {
+            for (;;) {
+                if (failure) return;
+                const at = cursor;
+                cursor += 1;
+                if (at >= items.length) return;
+                try {
+                    results[at] = await worker(items[at]);
+                } catch (error) {
+                    if (!failure) failure = error;
+                    return;
+                }
+            }
+        };
+        const lanes = Math.max(1, Math.min(workers, items.length));
+        await Promise.all(Array.from({ length: lanes }, run));
+        if (failure) throw failure;
+        return results;
     }
 
     // 索引から版の一覧を返す。latestOnly では先頭ファイルと最後のチャンクだけを読む。
@@ -275,9 +328,11 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
         }
         const head = JSON.parse(await fetchText(repo, 'nap/index', 'index.json'));
         const defs = latestOnly ? head.chunks.slice(-1) : head.chunks;
+        const lists = await mapWithConcurrency(defs, async (def) =>
+            JSON.parse(textDecoder.decode(await fetchBytes(repo, 'nap/index', def.file))),
+        );
         const entries = [];
-        for (const def of defs) {
-            const list = JSON.parse(await fetchText(repo, 'nap/index', def.file));
+        for (const list of lists) {
             for (const entry of list) {
                 entries.push({
                     id: entry.id,
@@ -285,6 +340,7 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
                     at: entry.at,
                     tag: entry.tag || null,
                     code: entry.code || null,
+                    source: entry.source || null,
                 });
             }
         }
@@ -318,23 +374,22 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
     // 配信サーバー経由では、版の詳細からマニフェストを受け取る。ファイルのサイズも一緒に返る。
     async function fetchManifestRawViaApi(repo, versionId, tag) {
         const ref = pathRefFor(versionId, tag, true);
-        let lastError = null;
+        let status = null;
         try {
             const res = await doFetch(apiUrlFor(repo, `/versions/${ref}`));
+            status = res ? res.status : null;
             if (res && res.ok) {
                 const data = await res.json();
                 if (data && data.manifest) return data.manifest;
-                lastError = new Error('マニフェストが含まれていません');
-            } else {
-                lastError = new Error(`HTTP ${res ? res.status : '?'}`);
             }
-        } catch (error) {
-            lastError = error;
+        } catch {
+            status = null;
         }
         const error = new Error(
-            `取得できませんでした: ${repo} ${ref} version-manifest.json: ${lastError ? lastError.message : '不明'}`,
+            `${repo} の版 ${ref} のマニフェストを取得できませんでした。`,
         );
         error.napFetchFailed = true;
+        error.status = status;
         throw error;
     }
 
@@ -393,11 +448,22 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
         } catch (_) {}
     }
 
-    // 版のファイルを ZIP で一括取得する。配信サーバー経由のときだけ使う。
+    // 版のファイルを ZIP で一括取得する。配信サーバー経由ではそのアーカイブを、
+    // GitHub から直接取るときは版のタグの ZIP を使う。
     // 進捗は download が受信バイト数、unpack が展開したファイル数で進む。
     async function fetchPackageFilesViaZip(repo, versionId, tag, manifest, stats) {
-        const ref = pathRefFor(versionId, tag, true);
-        const res = await doFetch(apiUrlFor(repo, `/versions/${ref}/archive.zip`));
+        let url;
+        if (viaApi) {
+            const ref = pathRefFor(versionId, tag, true);
+            url = apiUrlFor(repo, `/versions/${ref}/archive.zip`);
+        } else {
+            if (!rawBaseFor(repo, rawBase).startsWith('https://raw.githubusercontent.com/')) {
+                throw new Error('ZIP の取得先がありません');
+            }
+            const tagRef = pathRefFor(versionId, tag, false);
+            url = `https://codeload.github.com/${repo}/zip/refs/tags/${tagRef}`;
+        }
+        const res = await doFetch(url);
         if (!res || !res.ok) throw new Error(`HTTP ${res ? res.status : '?'}`);
         let bytes;
         if (res.body && typeof res.body.getReader === 'function') {
@@ -432,11 +498,19 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
             bytes = new Uint8Array(await res.arrayBuffer());
         }
         const byName = new Map(readZipDirectory(bytes).map((entry) => [entry.name, entry]));
+        let prefix = '';
+        if (!byName.has('version-manifest.json')) {
+            for (const name of byName.keys()) {
+                if (!name.endsWith('/version-manifest.json')) continue;
+                const candidate = name.slice(0, -'version-manifest.json'.length);
+                if (!prefix || candidate.length < prefix.length) prefix = candidate;
+            }
+        }
         const names = Object.keys(manifest.files);
         const files = {};
         let done = 0;
         for (const rel of names) {
-            const entry = byName.get(rel);
+            const entry = byName.get(prefix + rel);
             if (!entry) throw new Error(`ZIP にファイルがありません: ${rel}`);
             const data = await inflateEntry(bytes, entry);
             const actual = await sha256Hex(data);
@@ -469,7 +543,7 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
             return fetchPackage(repo, versionId, hit.tag, stats, false);
         }
         let files = null;
-        if (viaApi) {
+        if (!files) {
             const byteFetchedBefore = stats ? stats.byteFetched || 0 : 0;
             const byteTotalBefore = stats ? stats.byteTotal || 0 : 0;
             try {
@@ -495,20 +569,22 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
                 notifyProgress(stats);
             }
             files = {};
-            for (const rel of Object.keys(manifest.files).sort(compareTextBytes)) {
+            const refText = pathRefFor(versionId, tag, viaApi);
+            const names = Object.keys(manifest.files).sort(compareTextBytes);
+            await mapWithConcurrency(names, async (rel) => {
             const expected = manifest.files[rel];
             const size = manifest.sizes ? manifest.sizes[rel] : undefined;
             const hit = await store.get(expected);
             if (hit) {
                 files[rel] = hit;
                 stats.cached += 1;
-                if (stats && Number.isInteger(size)) {
+                if (Number.isInteger(size)) {
                     stats.byteFetched = (stats.byteFetched || 0) + size;
                 }
                 notifyProgress(stats);
-                continue;
+                return;
             }
-            const bytes = await fetchBytes(repo, pathRefFor(versionId, tag, viaApi), rel);
+            const bytes = await fetchBytes(repo, refText, rel);
             const actual = await sha256Hex(bytes);
             if (actual !== expected) {
                 throw new Error(
@@ -518,15 +594,20 @@ export function createClient({ cache, fetch: fetchImpl, rawBase } = {}) {
             await store.put(expected, bytes);
             files[rel] = bytes;
             stats.fetched += 1;
-            if (stats) stats.byteFetched = (stats.byteFetched || 0) + bytes.length;
-            notifyProgress(stats);
+            if (Number.isInteger(bytes.length)) {
+                stats.byteFetched = (stats.byteFetched || 0) + bytes.length;
             }
+            notifyProgress(stats);
+            });
         }
         const libraries = {};
-        for (const ref of Object.keys(manifest.libraries).sort(compareTextBytes)) {
-            const lib = manifest.libraries[ref];
-            libraries[ref] = await fetchPackage(lib.repo, lib.version, null, stats, true);
-        }
+        await mapWithConcurrency(
+            Object.keys(manifest.libraries).sort(compareTextBytes),
+            async (ref) => {
+                const lib = manifest.libraries[ref];
+                libraries[ref] = await fetchPackage(lib.repo, lib.version, null, stats, true);
+            },
+        );
         return { versionId, tag, manifest, files, libraries };
     }
 
