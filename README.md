@@ -122,7 +122,8 @@ nap list は版の一覧を出します。nap show は、指定がなければ�
 
 ```console
 $ nap list Nyaitter/Client
-$ nap show --repo Nyaitter/Client
+$ nap show Nyaitter/Client
+$ nap show Nyaitter/Client/<版コード>
 ```
 
 対象を省くと、このフォルダの Git リポジトリの対象になります。Git の無い環境では、対象を指定してください。
