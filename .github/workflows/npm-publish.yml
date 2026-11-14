@@ -1,0 +1,32 @@
+name: Publish to npm
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+      - name: Update npm for trusted publishing
+        run: npm install --global npm@latest
+      - name: Check release version
+        run: |
+          node -e "const v=require('./package.json').version; if(process.env.GITHUB_REF_TYPE==='tag' && process.env.GITHUB_REF_NAME!=='v'+v) throw Error('Tag must match package.json version');"
+      - run: npm pack --dry-run
+      - name: Publish package
+        run: npm publish --access public --provenance
