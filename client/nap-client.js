@@ -201,8 +201,61 @@ export function createMemoryCache() {
         async get(hash) {
             return map.has(hash) ? map.get(hash) : null;
         },
+        async has(hash) {
+            return map.has(hash);
+        },
         async put(hash, bytes) {
             map.set(hash, bytes);
+        },
+    };
+}
+
+// ハッシュ単位のキャッシュを Cache Storage に置く実装。ブラウザで使う。
+// キーはハッシュそのものなので、版をまたいで同じファイルを共有できる。
+export function createCacheStorageCache(name = 'nap-file-cache') {
+    const keyFor = (hash) => `https://nap-cache.invalid/${hash}`;
+    let cachePromise = null;
+    const open = () => {
+        if (typeof caches === 'undefined') {
+            return Promise.reject(new Error('Cache Storage が使えない環境です。'));
+        }
+        if (!cachePromise) {
+            cachePromise = caches.open(name).catch((error) => {
+                cachePromise = null;
+                throw error;
+            });
+        }
+        return cachePromise;
+    };
+    return {
+        async get(hash) {
+            try {
+                const cache = await open();
+                const response = await cache.match(keyFor(hash));
+                if (!response) return null;
+                return new Uint8Array(await response.arrayBuffer());
+            } catch (_) {
+                return null;
+            }
+        },
+        async has(hash) {
+            try {
+                const cache = await open();
+                return Boolean(await cache.match(keyFor(hash)));
+            } catch (_) {
+                return false;
+            }
+        },
+        async put(hash, bytes) {
+            try {
+                const cache = await open();
+                await cache.put(
+                    keyFor(hash),
+                    new Response(bytes, { headers: { 'Content-Type': 'application/octet-stream' } }),
+                );
+            } catch (_) {
+                // 保存できない環境でも取得自体は続けられる。
+            }
         },
     };
 }
@@ -542,47 +595,23 @@ export function createClient({ cache, fetch: fetchImpl, rawBase: rawBaseOption, 
         return files;
     }
 
-    async function fetchPackage(repo, versionId, tag, stats, fallbackToTest) {
-        let manifest;
-        try {
-            manifest = await fetchManifest(repo, versionId, tag, stats);
-        } catch (error) {
-            if (!fallbackToTest || !error || error.napFetchFailed !== true) throw error;
-            const { entries } = await listVersions(repo);
-            const hit = entries.find((entry) => entry.id === versionId && entry.tag);
-            if (!hit) throw error;
-            return fetchPackage(repo, versionId, hit.tag, stats, false);
-        }
-        let files = null;
-        if (!files) {
-            const byteFetchedBefore = stats ? stats.byteFetched || 0 : 0;
-            const byteTotalBefore = stats ? stats.byteTotal || 0 : 0;
-            try {
-                files = await fetchPackageFilesViaZip(repo, versionId, tag, manifest, stats);
-            } catch (_) {
-                files = null;
-                if (stats) {
-                    stats.byteFetched = byteFetchedBefore;
-                    stats.byteTotal = byteTotalBefore;
-                }
+    // 版のファイルを1点ずつ取得する。キャッシュにあるファイルは取得しない。
+    async function fetchPackageFiles(repo, versionId, tag, manifest, stats) {
+        if (stats) {
+            stats.phase = 'download';
+            stats.total = (stats.total || 0) + Object.keys(manifest.files).length;
+            let byteTotal = 0;
+            for (const rel of Object.keys(manifest.files)) {
+                const size = manifest.sizes ? manifest.sizes[rel] : undefined;
+                if (Number.isInteger(size) && size >= 0) byteTotal += size;
             }
+            stats.byteTotal = (stats.byteTotal || 0) + byteTotal;
+            notifyProgress(stats);
         }
-        if (!files) {
-            if (stats) {
-                stats.phase = 'download';
-                stats.total = (stats.total || 0) + Object.keys(manifest.files).length;
-                let byteTotal = 0;
-                for (const rel of Object.keys(manifest.files)) {
-                    const size = manifest.sizes ? manifest.sizes[rel] : undefined;
-                    if (Number.isInteger(size) && size >= 0) byteTotal += size;
-                }
-                stats.byteTotal = (stats.byteTotal || 0) + byteTotal;
-                notifyProgress(stats);
-            }
-            files = {};
-            const refText = pathRefFor(versionId, tag, viaApi);
-            const names = Object.keys(manifest.files).sort(compareTextBytes);
-            await mapWithConcurrency(names, async (rel) => {
+        const files = {};
+        const refText = pathRefFor(versionId, tag, viaApi);
+        const names = Object.keys(manifest.files).sort(compareTextBytes);
+        await mapWithConcurrency(names, async (rel) => {
             const expected = manifest.files[rel];
             const size = manifest.sizes ? manifest.sizes[rel] : undefined;
             const hit = await store.get(expected);
@@ -609,7 +638,67 @@ export function createClient({ cache, fetch: fetchImpl, rawBase: rawBaseOption, 
                 stats.byteFetched = (stats.byteFetched || 0) + bytes.length;
             }
             notifyProgress(stats);
-            });
+        });
+        return files;
+    }
+
+    // キャッシュの充足具合から、ファイル単位で取る方が軽いかを判定する。
+    // サイズが分かる場合はバイト数、分からなければファイル数で比べる。
+    async function preferIndividualFiles(manifest) {
+        if (typeof store.has !== 'function') return false;
+        const names = Object.keys(manifest.files);
+        if (names.length === 0) return true;
+        let missing = 0;
+        let missingBytes = 0;
+        let totalBytes = 0;
+        let sizesKnown = true;
+        for (const rel of names) {
+            const size = manifest.sizes ? manifest.sizes[rel] : undefined;
+            if (Number.isInteger(size) && size >= 0) totalBytes += size;
+            else sizesKnown = false;
+            if (!(await store.has(manifest.files[rel]))) {
+                missing += 1;
+                if (Number.isInteger(size) && size >= 0) missingBytes += size;
+            }
+        }
+        if (sizesKnown && totalBytes > 0) return missingBytes * 2 <= totalBytes;
+        return missing * 2 <= names.length;
+    }
+
+    async function fetchPackage(repo, versionId, tag, stats, fallbackToTest) {
+        let manifest;
+        try {
+            manifest = await fetchManifest(repo, versionId, tag, stats);
+        } catch (error) {
+            if (!fallbackToTest || !error || error.napFetchFailed !== true) throw error;
+            const { entries } = await listVersions(repo);
+            const hit = entries.find((entry) => entry.id === versionId && entry.tag);
+            if (!hit) throw error;
+            return fetchPackage(repo, versionId, hit.tag, stats, false);
+        }
+        let files = null;
+        if (await preferIndividualFiles(manifest)) {
+            try {
+                files = await fetchPackageFiles(repo, versionId, tag, manifest, stats);
+            } catch (_) {
+                files = null;
+            }
+        }
+        if (!files) {
+            const byteFetchedBefore = stats ? stats.byteFetched || 0 : 0;
+            const byteTotalBefore = stats ? stats.byteTotal || 0 : 0;
+            try {
+                files = await fetchPackageFilesViaZip(repo, versionId, tag, manifest, stats);
+            } catch (_) {
+                files = null;
+                if (stats) {
+                    stats.byteFetched = byteFetchedBefore;
+                    stats.byteTotal = byteTotalBefore;
+                }
+            }
+        }
+        if (!files) {
+            files = await fetchPackageFiles(repo, versionId, tag, manifest, stats);
         }
         const libraries = {};
         await mapWithConcurrency(
@@ -699,7 +788,7 @@ export function createClient({ cache, fetch: fetchImpl, rawBase: rawBaseOption, 
 }
 
 if (typeof globalThis !== 'undefined') {
-    globalThis.NapClient = { createClient, createMemoryCache, parseSpec };
+    globalThis.NapClient = { createClient, createMemoryCache, createCacheStorageCache, parseSpec };
 }
 
-export default { createClient, createMemoryCache, parseSpec };
+export default { createClient, createMemoryCache, createCacheStorageCache, parseSpec };

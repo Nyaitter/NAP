@@ -15,8 +15,10 @@ const client = createClient({
 指定できるもの:
 
 - rawBase: 取得先の基底 URL。省略すると配信サーバーから取得する。GitHub から直接取るときは null を渡す
-- cache: get と put を持つオブジェクト。省略するとメモリ上のものになる
+- cache: get と put を持つオブジェクト。省略するとメモリ上のものになる。has も持つキャッシュでは、未取得のファイルが少ない版はファイル単位で取得する
 - fetch: 取得に使う fetch。省略すると標準の fetch を使う
+
+ブラウザでは createCacheStorageCache を渡すと、取得したファイルを Cache Storage に保存して版をまたいで再利用します。
 
 取得先は、各呼び出しに渡す入手先から決まります。入手先の形は所有者とリポジトリ名を並べたもので、対象は GitHub のリポジトリです。
 
@@ -133,3 +135,7 @@ source は必須です。rawBase と currentVersionId は任意です。rawBase 
 - cacheName: 版の保存名を返す
 
 store はブラウザの Cache Storage を使います。使えない環境ではエラーになります。
+
+取得したファイルは Cache Storage に保存され、次の版の取得では変わったファイルだけを取得します。
+
+ensurePersistentStorage を呼び出すと、ブラウザにストレージの永続化を求めます。許可されると、保存した版がブラウザの都合で消されにくくなります。
