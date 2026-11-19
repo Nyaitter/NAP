@@ -160,10 +160,14 @@ function compareTextBytes(a, b) {
 }
 
 // 版IDの再計算。ファイル行と構成員行をバイト順に並べたものの SHA-256。
-async function computeVersionId(files, libraries) {
+async function computeVersionId(files, libraries, externals = {}) {
     const lines = Object.entries(files).map(([rel, hash]) => `F ${rel} ${hash}`);
     for (const [ref, lib] of Object.entries(libraries)) {
         lines.push(`P ${ref} ${lib.version}`);
+    }
+    for (const [ref, ext] of Object.entries(externals || {})) {
+        const version = typeof ext === 'string' ? ext : ext.version;
+        lines.push(`X ${ref} ${version}`);
     }
     lines.sort(compareTextBytes);
     return sha256Hex(textEncoder.encode(`${lines.join('\n')}\n`));
@@ -185,13 +189,19 @@ function validateManifest(manifest) {
             throw new Error(`マニフェストの構成員が不正です: ${ref}`);
         }
     }
+    const externals = manifest.externals || {};
+    for (const [ref, version] of Object.entries(externals)) {
+        if (!ID_PATTERN.test(version || '')) {
+            throw new Error(`マニフェストの外部構成員が不正です: ${ref}`);
+        }
+    }
     const sizes = manifest.sizes || {};
     for (const [rel, size] of Object.entries(sizes)) {
         if (!Number.isInteger(size) || size < 0) {
             throw new Error(`マニフェストのファイルサイズが不正です: ${rel}`);
         }
     }
-    return { files, libraries, sizes };
+    return { files, libraries, sizes, externals };
 }
 
 // ハッシュ単位のキャッシュの単純な実装。差し替えの見本として置く。
@@ -358,7 +368,7 @@ export function createClient({ cache, fetch: fetchImpl, rawBase: rawBaseOption, 
 
     // 索引から版の一覧を返す。latestOnly では先頭ファイルと最後のチャンクだけを読む。
     // 各項目の tag は、正式版では null、TestVersion ではそのラベル。
-    async function listVersions(repo, { latestOnly = false } = {}) {
+    async function listVersions(repo, { latestOnly = false, fresh = false } = {}) {
         if (viaApi) {
             try {
                 const entries = [];
@@ -367,7 +377,7 @@ export function createClient({ cache, fetch: fetchImpl, rawBase: rawBaseOption, 
                     const suffix = cursor
                         ? `/versions?limit=100&cursor=${encodeURIComponent(cursor)}`
                         : '/versions?limit=100';
-                    const res = await doFetch(apiUrlFor(repo, suffix));
+                    const res = await doFetch(apiUrlFor(repo, suffix), fresh ? { cache: 'no-store' } : undefined);
                     if (!res || !res.ok) throw new Error(`HTTP ${res ? res.status : '?'}`);
                     const data = await res.json();
                     const list = Array.isArray(data) ? data : data.versions || [];
@@ -471,7 +481,7 @@ export function createClient({ cache, fetch: fetchImpl, rawBase: rawBaseOption, 
         }
         if (stats) stats.fetched += 1;
         const manifest = validateManifest(raw);
-        const recomputed = await computeVersionId(manifest.files, manifest.libraries);
+        const recomputed = await computeVersionId(manifest.files, manifest.libraries, manifest.externals);
         if (recomputed !== versionId) {
             throw new Error(`版IDが一致しません: タグ ${versionId} / 再計算 ${recomputed}`);
         }

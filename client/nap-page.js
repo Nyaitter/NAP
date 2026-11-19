@@ -59,9 +59,20 @@ function typeFor(filePath) {
 }
 
 // 取得結果を、Cache Storage に置くパスの組へ平らにする。本体と構成員が対象。
+// 版マニフェストも記録として一緒に置き、格納済みの版が自分を説明できるようにする。
 function flattenInto(out, prefix, result) {
     for (const [rel, bytes] of Object.entries(result.files || {})) {
         out[prefix + rel] = bytes;
+    }
+    if (result.manifest && result.manifest.files) {
+        const record = {
+            files: result.manifest.files,
+            libraries: result.manifest.libraries || {},
+        };
+        if (result.manifest.externals && Object.keys(result.manifest.externals).length > 0) {
+            record.externals = result.manifest.externals;
+        }
+        out[`${prefix}version-manifest.json`] = new TextEncoder().encode(JSON.stringify(record));
     }
     for (const [ref, lib] of Object.entries(result.libraries || {})) {
         flattenInto(out, `${prefix}nap_modules/${ref}/`, lib);
@@ -77,8 +88,8 @@ export function createNapPage(options = {}) {
     let currentVersionId = options.currentVersionId || null;
 
     // 版の一覧。索引の順。各要素は { id, code, tag, commit, source, at, description }。
-    async function versions() {
-        const { entries } = await client.listVersions(source);
+    async function versions({ fresh = false } = {}) {
+        const { entries } = await client.listVersions(source, { fresh });
         return entries;
     }
 
