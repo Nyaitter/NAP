@@ -17,7 +17,22 @@
 // 取得と照合は nap-client が担う。このライブラリは、版の発見・更新確認と、
 // ブラウザの Cache Storage への格納を担当する。
 
-import { createClient } from './nap-client.js';
+import { createClient, createCacheStorageCache } from './nap-client.js';
+
+// ブラウザのストレージ永続化を求める。許可されると、版のキャッシュが
+// ブラウザの都合で消されにくくなる。現在の状態を返す。
+export async function ensurePersistentStorage() {
+    try {
+        if (typeof navigator === 'undefined' || !navigator.storage) return false;
+        if (typeof navigator.storage.persisted === 'function' && await navigator.storage.persisted()) {
+            return true;
+        }
+        if (typeof navigator.storage.persist !== 'function') return false;
+        return await navigator.storage.persist();
+    } catch (_) {
+        return false;
+    }
+}
 
 const MIME_TYPES = {
     '.html': 'text/html; charset=utf-8',
@@ -58,7 +73,7 @@ export function createNapPage(options = {}) {
     if (!source) {
         throw new Error('source が必要です。<所有者>/<リポジトリ> の形で指定してください。');
     }
-    const client = givenClient || createClient({ rawBase, fetch: fetchImpl, cache });
+    const client = givenClient || createClient({ rawBase, fetch: fetchImpl, cache: cache || createCacheStorageCache() });
     let currentVersionId = options.currentVersionId || null;
 
     // 版の一覧。索引の順。各要素は { id, code, tag, commit, source, at, description }。
@@ -184,4 +199,4 @@ export function createNapPage(options = {}) {
     };
 }
 
-export default { createNapPage };
+export default { createNapPage, ensurePersistentStorage };
